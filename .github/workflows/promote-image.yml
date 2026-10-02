@@ -1,0 +1,110 @@
+# Reusable promotion: deploys to an environment the image that was already built (and
+# tested) from the same content, without rebuilding.
+#
+#   resolve -> finds `tree-<git tree of HEAD>` in the registry. A merge commit or a squash
+#              of `development` into `main` has a new commit sha but the same tree, so it
+#              maps to the image built on `development`. If there is no image for this
+#              tree, the content never went through the build pipeline (e.g. a commit made
+#              straight to `main`) and the promotion stops.
+#   tag     -> adds the moving tag `<environment>` and `<environment>-sha-<commit>`, for
+#              traceability in the registry.
+#   deploy  -> deploy-compose.yml, pinned to the `tree-` tag.
+#
+# Works for any image built with the `tree-` convention (see docusaurus-portal.yml).
+
+name: Promote image
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment to promote to (see deploy-compose.yml).
+        type: string
+        default: production
+      image-name:
+        description: Image name without tag. Defaults to ghcr.io/<owner>/<repo>.
+        type: string
+        default: ''
+      compose-dir:
+        description: Directory on the server with the compose project.
+        type: string
+        default: /opt/stack
+      compose-service:
+        description: Compose service to update.
+        type: string
+        required: true
+      tag-variable:
+        description: Variable the compose file reads the image tag from.
+        type: string
+        default: IMAGE_TAG
+      healthcheck-url:
+        description: URL that must answer 2xx after the deploy. Defaults to the environment's HEALTHCHECK_URL.
+        type: string
+        default: ''
+    outputs:
+      image:
+        description: Promoted image reference (name:tree-<git tree>).
+        value: ${{ jobs.resolve.outputs.image }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: ref
+        name: Resolve image reference
+        env:
+          IMAGE_NAME: ${{ inputs.image-name || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          name="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          tree="$(git rev-parse --short=12 'HEAD^{tree}')"
+          {
+            echo "name=$name"
+            echo "image=$name:tree-$tree"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check that the image was built
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          if ! docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "::error::$IMAGE does not exist: this content was never built by the build pipeline. Merge it through the development branch first."
+            exit 1
+          fi
+          echo "Promoting $IMAGE"
+
+      - name: Tag for the environment
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+          NAME: ${{ steps.ref.outputs.name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          docker buildx imagetools create \
+            -t "$NAME:$ENVIRONMENT" \
+            -t "$NAME:$ENVIRONMENT-sha-${GITHUB_SHA::7}" \
+            "$IMAGE"
+          echo "Promoted \`$IMAGE\` to \`$ENVIRONMENT\`." >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: resolve
+    uses: ./.github/workflows/deploy-compose.yml
+    with:
+      image: ${{ needs.resolve.outputs.image }}
+      environment: ${{ inputs.environment }}
+      compose-dir: ${{ inputs.compose-dir }}
+      compose-service: ${{ inputs.compose-service }}
+      tag-variable: ${{ inputs.tag-variable }}
+      healthcheck-url: ${{ inputs.healthcheck-url }}
+    secrets: inherit

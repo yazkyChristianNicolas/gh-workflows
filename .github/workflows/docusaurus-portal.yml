@@ -1,17 +1,13 @@
-# Reusable pipeline for Docusaurus documentation portals served as a Docker image.
+# Reusable build pipeline for Docusaurus documentation portals packaged as a Docker image.
 #
-#   verify  -> npm ci, typecheck (optional) and `npm run build`
-#   image   -> docker build + push to GHCR (tags: sha-<short>, latest on the default branch)
-#   deploy  -> SSH into the server, pull and restart only this portal's compose service,
-#              pinned to the image that was just built, then run an optional health check
+#   verify -> npm ci, typecheck (optional) and `npm run build`
+#   image  -> docker build + push to GHCR, tagged `sha-<commit>` and `tree-<git tree>`
+#   deploy -> optional, through deploy-compose.yml, to the given environment
 #
-# The portal repo must have a Dockerfile that builds the site itself (see the
-# berlinesa-developers-platform repo for a reference implementation).
-#
-# Server contract (see README):
-#   - Docker + Docker Compose, logged in to ghcr.io with a read:packages token.
-#   - A compose project in `compose-dir` with a service named `compose-service` whose image
-#     reads its tag from `tag-variable`, e.g. `image: ghcr.io/owner/portal:${PORTAL_TAG:-latest}`.
+# Build once, promote everywhere: the image must not bake environment-specific values (read
+# them at container start, see the berlinesa-developers-platform Dockerfile). The `tree-`
+# tag identifies the content, not the commit, so promote-image.yml can find this exact
+# image after a merge commit or a squash into the production branch.
 
 name: Docusaurus portal
 
@@ -28,8 +24,9 @@ on:
         default: true
       build-env:
         description: >-
-          Build-time variables, one KEY=VALUE per line. Exported for `npm run build` and
-          passed to `docker build` as build args.
+          Build-time variables, one KEY=VALUE per line, for `npm run build` and as
+          `docker build` args. Must be the same for every environment (the image is promoted
+          as is); environment-specific values belong in the container's runtime env.
         type: string
         default: ''
       image-name:
@@ -41,13 +38,13 @@ on:
         type: boolean
         default: false
       deploy:
-        description: Deploy the pushed image to the server. Requires push-image.
+        description: Deploy the pushed image to `environment`. Requires push-image.
         type: boolean
         default: false
       environment:
-        description: GitHub environment used by the deploy job (secrets, approvals).
+        description: GitHub environment to deploy to (see deploy-compose.yml).
         type: string
-        default: production
+        default: development
       compose-dir:
         description: Directory on the server with the compose project.
         type: string
@@ -61,23 +58,12 @@ on:
         type: string
         default: IMAGE_TAG
       healthcheck-url:
-        description: URL that must answer 2xx after the deploy. Empty to skip.
+        description: URL that must answer 2xx after the deploy. Defaults to the environment's HEALTHCHECK_URL.
         type: string
         default: ''
-    secrets:
-      DEPLOY_HOST:
-        required: false
-      DEPLOY_USER:
-        required: false
-      DEPLOY_SSH_KEY:
-        description: Private key authorized on the server for DEPLOY_USER.
-        required: false
-      DEPLOY_KNOWN_HOSTS:
-        description: Output of `ssh-keyscan <host>`, to pin the server's host key.
-        required: false
     outputs:
       image:
-        description: Pushed image reference (name:sha-<short>).
+        description: Pushed image reference (name:tree-<git tree>).
         value: ${{ jobs.image.outputs.image }}
 
 jobs:
@@ -122,19 +108,13 @@ jobs:
           IMAGE_NAME: ${{ inputs.image-name || format('ghcr.io/{0}', github.repository) }}
         run: |
           name="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          tree="$(git rev-parse --short=12 'HEAD^{tree}')"
           {
             echo "name=$name"
-            echo "tag=sha-${GITHUB_SHA::7}"
-            echo "image=$name:sha-${GITHUB_SHA::7}"
+            echo "sha=sha-${GITHUB_SHA::7}"
+            echo "tree=tree-$tree"
+            echo "image=$name:tree-$tree"
           } >> "$GITHUB_OUTPUT"
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.ref.outputs.name }}
-          tags: |
-            type=raw,value=${{ steps.ref.outputs.tag }}
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - uses: docker/setup-buildx-action@v3
 
@@ -144,7 +124,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - id: existing
+        name: Reuse the image if this tree was already built
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$IMAGE already exists (same content built before): reusing it."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        if: steps.existing.outputs.found == 'false'
+        with:
+          images: ${{ steps.ref.outputs.name }}
+          tags: |
+            type=raw,value=${{ steps.ref.outputs.tree }}
+            type=raw,value=${{ steps.ref.outputs.sha }}
+
       - uses: docker/build-push-action@v6
+        if: steps.existing.outputs.found == 'false'
         with:
           context: .
           push: true
@@ -154,87 +156,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Tag the reused image with this commit
+        if: steps.existing.outputs.found == 'true'
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+          SHA_TAG: ${{ steps.ref.outputs.name }}:${{ steps.ref.outputs.sha }}
+        run: docker buildx imagetools create -t "$SHA_TAG" "$IMAGE"
+
   deploy:
     needs: image
     if: inputs.push-image && inputs.deploy
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
-    # One deploy at a time per service; a newer one waits instead of racing.
-    concurrency:
-      group: deploy-${{ inputs.compose-service }}
-      cancel-in-progress: false
-    steps:
-      - name: Check deploy configuration
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-          SERVICE: ${{ inputs.compose-service }}
-        run: |
-          missing=()
-          [ -n "$DEPLOY_HOST" ] || missing+=(DEPLOY_HOST)
-          [ -n "$DEPLOY_USER" ] || missing+=(DEPLOY_USER)
-          [ -n "$DEPLOY_SSH_KEY" ] || missing+=(DEPLOY_SSH_KEY)
-          [ -n "$DEPLOY_KNOWN_HOSTS" ] || missing+=(DEPLOY_KNOWN_HOSTS)
-          [ -n "$SERVICE" ] || missing+=("input compose-service")
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::Missing deploy configuration: ${missing[*]}"
-            exit 1
-          fi
-
-      - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-
-      # The tag is persisted in the compose project's .env (TAG_VARIABLE=sha-...), so a later
-      # manual `docker compose up -d` keeps this exact version. Rollback = re-run the deploy
-      # of an older commit.
-      - name: Pull and restart the service
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DIR: ${{ inputs.compose-dir }}
-          SERVICE: ${{ inputs.compose-service }}
-          TAG_VARIABLE: ${{ inputs.tag-variable }}
-          IMAGE: ${{ needs.image.outputs.image }}
-        run: |
-          tag="${IMAGE##*:}"
-          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- \
-            "$DIR" "$SERVICE" "$TAG_VARIABLE" "$tag" <<'REMOTE'
-          set -euo pipefail
-          dir="$1"; service="$2"; variable="$3"; tag="$4"
-          cd "$dir"
-          touch .env
-          if grep -q "^${variable}=" .env; then
-            sed -i "s|^${variable}=.*|${variable}=${tag}|" .env
-          else
-            echo "${variable}=${tag}" >> .env
-          fi
-          docker compose pull "$service"
-          docker compose up -d --no-deps "$service"
-          docker image prune -f > /dev/null
-          REMOTE
-          echo "Deployed \`$IMAGE\` as compose service \`$SERVICE\`." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Health check
-        if: inputs.healthcheck-url != ''
-        env:
-          URL: ${{ inputs.healthcheck-url }}
-        run: |
-          for attempt in $(seq 1 10); do
-            if curl -fsS -o /dev/null "$URL"; then
-              echo "Healthy: $URL"
-              exit 0
-            fi
-            echo "Attempt $attempt: $URL not healthy yet"
-            sleep 6
-          done
-          echo "::error::$URL did not answer 2xx after the deploy"
-          exit 1
+    uses: ./.github/workflows/deploy-compose.yml
+    with:
+      image: ${{ needs.image.outputs.image }}
+      environment: ${{ inputs.environment }}
+      compose-dir: ${{ inputs.compose-dir }}
+      compose-service: ${{ inputs.compose-service }}
+      tag-variable: ${{ inputs.tag-variable }}
+      healthcheck-url: ${{ inputs.healthcheck-url }}
+    secrets: inherit
