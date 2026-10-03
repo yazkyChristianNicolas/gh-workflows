@@ -115,6 +115,9 @@ jobs:
             jq -r '.[] | "| \(.keep // "**delete**") | \(.tags | join(", ")) | \(.created_at) | `\(.digest[7:19])` |"' final.json
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # The same plan in the log, for auditing past runs.
+          jq -r '.[] | "\(.keep // "DELETE")\t\(.created_at)\t\(.digest[7:19])\t\(.tags | join(","))"' final.json
+
           if [ "$DRY_RUN" = "true" ]; then
             echo "Dry run: would delete $to_delete of $total versions."
             exit 0
