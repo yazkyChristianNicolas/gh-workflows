@@ -6,9 +6,8 @@
 #              maps to the image built on `development`. If there is no image for this
 #              tree, the content never went through the build pipeline (e.g. a commit made
 #              straight to `main`) and the promotion stops.
-#   tag     -> adds the moving tag `<environment>` and `<environment>-sha-<commit>`, for
-#              traceability in the registry.
-#   deploy  -> deploy-compose.yml, pinned to the `tree-` tag.
+#   deploy  -> deploy-compose.yml, pinned to the `tree-` tag. After a successful deploy it
+#              tags the image `<environment>` and `<environment>-sha-<commit>`.
 #
 # Works for any image built with the `tree-` convention (see docusaurus-portal.yml).
 
@@ -51,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
     outputs:
       image: ${{ steps.ref.outputs.image }}
     steps:
@@ -78,24 +77,14 @@ jobs:
       - name: Check that the image was built
         env:
           IMAGE: ${{ steps.ref.outputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
         run: |
           if ! docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
             echo "::error::$IMAGE does not exist: this content was never built by the build pipeline. Merge it through the development branch first."
             exit 1
           fi
           echo "Promoting $IMAGE"
-
-      - name: Tag for the environment
-        env:
-          IMAGE: ${{ steps.ref.outputs.image }}
-          NAME: ${{ steps.ref.outputs.name }}
-          ENVIRONMENT: ${{ inputs.environment }}
-        run: |
-          docker buildx imagetools create \
-            -t "$NAME:$ENVIRONMENT" \
-            -t "$NAME:$ENVIRONMENT-sha-${GITHUB_SHA::7}" \
-            "$IMAGE"
-          echo "Promoted \`$IMAGE\` to \`$ENVIRONMENT\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Promoting \`$IMAGE\` to \`$ENVIRONMENT\`." >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: resolve

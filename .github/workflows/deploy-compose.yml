@@ -7,6 +7,8 @@
 #      manual `docker compose up -d` keeps this exact version.
 #   3. `docker compose pull` + `up -d --no-deps` of that single service.
 #   4. Optional health check (input, or the environment variable HEALTHCHECK_URL).
+#   5. Tags the image `<environment>` and `<environment>-sha-<commit>` in the registry, so the
+#      registry always shows what is actually running (cleanup-images.yml keeps these).
 #
 # The compose directory also falls back to an environment variable (COMPOSE_DIR), so two
 # environments on the same server never share a compose project by accident.
@@ -58,6 +60,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write
     # One deploy at a time per environment and service; a newer one waits instead of racing.
     concurrency:
       group: deploy-${{ inputs.environment }}-${{ inputs.compose-service }}
@@ -149,3 +154,23 @@ jobs:
           done
           echo "::error::$URL did not answer 2xx after the deploy"
           exit 1
+
+      - name: Mark the image as deployed
+        if: steps.gate.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag the image with the environment
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          IMAGE: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          name="${IMAGE%:*}"
+          docker buildx imagetools create \
+            -t "$name:$ENVIRONMENT" \
+            -t "$name:$ENVIRONMENT-sha-${GITHUB_SHA::7}" \
+            "$IMAGE"

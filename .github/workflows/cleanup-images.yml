@@ -1,0 +1,126 @@
+# Reusable retention policy for a GHCR container package.
+#
+# Keeps:
+#   - every version with a tag matching `keep-tags` (default: the moving environment tags
+#     `development` and `production`, which deploy-compose.yml points at what is running);
+#   - the `keep-last` most recent tagged versions (rollback candidates);
+#   - anything created in the last `keep-recent-hours` (never race a build in progress);
+#   - the child manifests of every kept image. docker/build-push-action pushes an index
+#     whose children (the platform image and its provenance attestation) show up in GHCR as
+#     untagged versions: deleting them would break the kept image, so they are resolved
+#     from the registry and protected.
+# Deletes everything else, including orphan untagged versions.
+#
+# Run it with `dry-run: true` first: it prints the plan and deletes nothing.
+
+name: Cleanup images
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: GHCR package (image name without owner). Defaults to the repository name.
+        type: string
+        default: ''
+      keep-tags:
+        description: Regex; versions with any tag matching it are always kept.
+        type: string
+        default: '^(development|production)$'
+      keep-last:
+        description: Number of most recent tagged versions to keep.
+        type: number
+        default: 10
+      keep-recent-hours:
+        description: Versions younger than this are always kept.
+        type: number
+        default: 24
+      dry-run:
+        description: Print what would be deleted without deleting.
+        type: boolean
+        default: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply the retention policy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ inputs.package-name || github.event.repository.name }}
+          KEEP_TAGS: ${{ inputs.keep-tags }}
+          KEEP_LAST: ${{ inputs.keep-last }}
+          KEEP_RECENT_HOURS: ${{ inputs.keep-recent-hours }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          owner="$GITHUB_REPOSITORY_OWNER"
+          package="$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/$(echo "$owner" | tr '[:upper:]' '[:lower:]')/$package"
+          if [ "$(gh api "users/$owner" --jq .type)" = "Organization" ]; then
+            base="orgs/$owner/packages/container/$package/versions"
+          else
+            base="users/$owner/packages/container/$package/versions"
+          fi
+
+          gh api --paginate "$base?per_page=100" --jq '.[]' | jq -s '.' > versions.json
+
+          # Root decisions: why each version is kept (null = candidate for deletion).
+          jq --arg re "$KEEP_TAGS" \
+             --argjson n "$KEEP_LAST" \
+             --argjson hours "$KEEP_RECENT_HOURS" \
+             --argjson now "$(date +%s)" '
+            sort_by(.created_at) | reverse
+            | ([ .[] | select((.metadata.container.tags | length) > 0) ][:$n] | map(.id)) as $last
+            | map({
+                id, digest: .name, created_at,
+                tags: .metadata.container.tags,
+                keep: (
+                  if (.metadata.container.tags | any(test($re))) then "tag"
+                  elif (.id as $id | $last | index($id)) != null then "last-\($n)"
+                  elif (($now - (.created_at | fromdateiso8601)) / 3600) < $hours then "recent"
+                  else null end)
+              })' versions.json > plan.json
+
+          # Protect the child manifests of every kept index.
+          : > children.txt
+          for digest in $(jq -r '.[] | select(.keep != null and (.tags | length) > 0) | .digest' plan.json); do
+            docker buildx imagetools inspect --raw "$image@$digest" \
+              | jq -r '.manifests[]?.digest' >> children.txt
+          done
+          jq --rawfile children children.txt '
+            ($children | split("\n") | map(select(. != ""))) as $c
+            | map(if .keep == null and (.digest as $d | $c | index($d)) != null
+                  then .keep = "child" else . end)' plan.json > final.json
+
+          total=$(jq 'length' final.json)
+          delete_ids=$(jq -r '.[] | select(.keep == null) | .id' final.json)
+          to_delete=$(jq '[.[] | select(.keep == null)] | length' final.json)
+
+          {
+            echo "### Retention for \`$image\`"
+            echo
+            echo "$total versions: keep $((total - to_delete)), delete $to_delete$([ "$DRY_RUN" = "true" ] && echo " (dry run)")."
+            echo
+            echo "| Decision | Tags | Created | Digest |"
+            echo "|---|---|---|---|"
+            jq -r '.[] | "| \(.keep // "**delete**") | \(.tags | join(", ")) | \(.created_at) | `\(.digest[7:19])` |"' final.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would delete $to_delete of $total versions."
+            exit 0
+          fi
+          for id in $delete_ids; do
+            gh api -X DELETE "$base/$id" > /dev/null
+            echo "Deleted version $id"
+          done
+          echo "Deleted $to_delete of $total versions."

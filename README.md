@@ -12,6 +12,7 @@ Reusable GitHub Actions workflows, callable from any of my repos.
 | `docusaurus-portal.yml` | Docusaurus docs portal: verify + build image once + optional deploy | PR, push to `development` |
 | `promote-image.yml` | Any image built with the `tree-` convention: promote without rebuilding | push to `main` |
 | `deploy-compose.yml` | Deploy an image to a Docker Compose service over SSH | called by the two above (or directly) |
+| `cleanup-images.yml` | GHCR retention: keep environment tags + last N, delete the rest | schedule (e.g. weekly) |
 
 ## Usage
 
@@ -40,11 +41,13 @@ feature/*  --PR-->  development  --PR-->  main
 - **Promote** (`promote-image.yml`, on push to `main`): does **not** build. It looks up
   `tree-<git tree of main>`: merging `development` into `main` (merge commit or squash)
   creates a new commit but keeps the same tree, so it finds the exact image that was
-  tested in development. It tags it `production` and `production-sha-<commit>` and deploys
-  it. If there is no image for that tree, the content never went through `development`
+  tested in development. It deploys it; after a successful deploy it is tagged `production` and
+  `production-sha-<commit>`. If there is no image for that tree, the content never went through `development`
   (e.g. a commit made straight to `main`) and the promotion fails.
 - **Deploy** (`deploy-compose.yml`, used by both): over SSH, writes the image tag into the
-  server's compose `.env` and restarts only that service.
+  server's compose `.env` and restarts only that service. After a successful deploy it tags
+  the image with the environment name (`development` / `production`), so the registry always
+  shows what is running in each environment.
 
 Because the same image runs everywhere, **it must not bake environment-specific values**
 (URLs, ids). Read them when the container starts; for a static site, build with
@@ -196,3 +199,54 @@ With both environments on the same server, keep a **single** Caddy (only one pro
 bind 80/443): put the development services in their own compose project (e.g.
 `COMPOSE_DIR=/opt/stack-dev` in the `development` environment) attached to an external network shared with Caddy, and route
 the development domains to them from the same Caddyfile.
+
+## `cleanup-images.yml`
+
+Retention policy for a GHCR container package. Keeps:
+
+- every version with a tag matching `keep-tags` (default `^(development|production)$`, the
+  tags `deploy-compose.yml` moves to what is running);
+- the `keep-last` most recent tagged versions (rollback candidates);
+- anything younger than `keep-recent-hours` (never races a build in progress);
+- the child manifests of every kept image: `docker/build-push-action` pushes an index whose
+  children (platform image, provenance attestation) appear in GHCR as **untagged versions**,
+  and deleting them would break the kept image.
+
+Everything else is deleted, including orphan untagged versions. The job summary lists every
+version with its decision.
+
+```yaml
+# .github/workflows/cleanup-images.yml
+name: Cleanup images
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    uses: yazkyChristianNicolas/gh-workflows/.github/workflows/cleanup-images.yml@main
+    with:
+      keep-last: 10
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+```
+
+| Input | Default | Description |
+|---|---|---|
+| `package-name` | repository name | GHCR package (image name without owner). |
+| `keep-tags` | `^(development\|production)$` | Regex; versions with any matching tag are always kept. |
+| `keep-last` | `10` | Most recent tagged versions to keep. |
+| `keep-recent-hours` | `24` | Versions younger than this are always kept. |
+| `dry-run` | `false` | Print the plan without deleting. |
+
+The package must be linked to the calling repository with **Admin** access for its
+`GITHUB_TOKEN` (the default when the image was pushed by that repository's workflows).
