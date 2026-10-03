@@ -8,6 +8,9 @@
 #   3. `docker compose pull` + `up -d --no-deps` of that single service.
 #   4. Optional health check (input, or the environment variable HEALTHCHECK_URL).
 #
+# The compose directory also falls back to an environment variable (COMPOSE_DIR), so two
+# environments on the same server never share a compose project by accident.
+#
 # Server contract: see README.
 
 name: Deploy compose service
@@ -24,9 +27,9 @@ on:
         type: string
         required: true
       compose-dir:
-        description: Directory on the server with the compose project.
+        description: Directory on the server with the compose project. Defaults to the environment variable COMPOSE_DIR, then /opt/stack.
         type: string
-        default: /opt/stack
+        default: ''
       compose-service:
         description: Compose service to update.
         type: string
@@ -107,7 +110,7 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DIR: ${{ inputs.compose-dir }}
+          DIR: ${{ inputs.compose-dir || vars.COMPOSE_DIR || '/opt/stack' }}
           SERVICE: ${{ inputs.compose-service }}
           TAG_VARIABLE: ${{ inputs.tag-variable }}
           IMAGE: ${{ inputs.image }}

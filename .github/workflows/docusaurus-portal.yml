@@ -46,9 +46,9 @@ on:
         type: string
         default: development
       compose-dir:
-        description: Directory on the server with the compose project.
+        description: Directory on the server with the compose project. Defaults to the environment variable COMPOSE_DIR, then /opt/stack.
         type: string
-        default: /opt/stack
+        default: ''
       compose-service:
         description: Compose service to update on deploy.
         type: string

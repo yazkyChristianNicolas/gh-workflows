@@ -127,7 +127,7 @@ jobs:
 |---|---|---|
 | `image` | — | Full image reference (`name:tag`). Only the tag is written to the server. |
 | `environment` | — | GitHub environment with the deploy secrets and variables. |
-| `compose-dir` | `/opt/stack` | Compose project directory on the server. |
+| `compose-dir` | environment variable `COMPOSE_DIR`, then `/opt/stack` | Compose project directory on the server. |
 | `compose-service` | — | Compose service to update. |
 | `tag-variable` | `IMAGE_TAG` | Variable the compose file reads the image tag from. Use one per service. |
 | `healthcheck-url` | environment variable `HEALTHCHECK_URL` | URL that must answer 2xx after the deploy (10 attempts, 6 s apart). Empty to skip. |
@@ -139,6 +139,7 @@ Create the GitHub environments `development` and `production` in the calling rep
 | Kind | Name | Value |
 |---|---|---|
 | Variable | `DEPLOY_ENABLED` | `true` to deploy. While unset, the deploy job is skipped (not failed). |
+| Variable | `COMPOSE_DIR` | Compose project directory on the server for this environment (e.g. `/opt/stack` for production, `/opt/stack-dev` for development). Required when both environments share a server. |
 | Variable | `HEALTHCHECK_URL` | Optional. Public URL checked after the deploy. |
 | Secret | `DEPLOY_HOST` | Server IP or hostname. |
 | Secret | `DEPLOY_USER` | SSH user allowed to run `docker` (member of the `docker` group). |
@@ -193,5 +194,5 @@ developers.example.com {
 
 With both environments on the same server, keep a **single** Caddy (only one process can
 bind 80/443): put the development services in their own compose project (e.g.
-`compose-dir: /opt/stack-dev`) attached to an external network shared with Caddy, and route
+`COMPOSE_DIR=/opt/stack-dev` in the `development` environment) attached to an external network shared with Caddy, and route
 the development domains to them from the same Caddyfile.
