@@ -1,0 +1,177 @@
+# Reusable build pipeline for Docusaurus documentation portals packaged as a Docker image.
+#
+#   verify -> npm ci, typecheck (optional) and `npm run build`
+#   image  -> docker build + push to GHCR, tagged `sha-<commit>` and `tree-<git tree>`
+#   deploy -> optional, through deploy-compose.yml, to the given environment
+#
+# Build once, promote everywhere: the image must not bake environment-specific values (read
+# them at container start, see the berlinesa-developers-platform Dockerfile). The `tree-`
+# tag identifies the content, not the commit, so promote-image.yml can find this exact
+# image after a merge commit or a squash into the production branch.
+
+name: Docusaurus portal
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version used to verify the build.
+        type: string
+        default: '24'
+      typecheck:
+        description: Run `npm run typecheck` before building.
+        type: boolean
+        default: true
+      build-env:
+        description: >-
+          Build-time variables, one KEY=VALUE per line, for `npm run build` and as
+          `docker build` args. Must be the same for every environment (the image is promoted
+          as is); environment-specific values belong in the container's runtime env.
+        type: string
+        default: ''
+      image-name:
+        description: Image name without tag. Defaults to ghcr.io/<owner>/<repo>.
+        type: string
+        default: ''
+      push-image:
+        description: Build and push the image to GHCR.
+        type: boolean
+        default: false
+      deploy:
+        description: Deploy the pushed image to `environment`. Requires push-image.
+        type: boolean
+        default: false
+      environment:
+        description: GitHub environment to deploy to (see deploy-compose.yml).
+        type: string
+        default: development
+      compose-dir:
+        description: Directory on the server with the compose project. Defaults to the environment variable COMPOSE_DIR, then /opt/stack.
+        type: string
+        default: ''
+      compose-service:
+        description: Compose service to update on deploy.
+        type: string
+        default: ''
+      tag-variable:
+        description: Variable the compose file reads the image tag from.
+        type: string
+        default: IMAGE_TAG
+      healthcheck-url:
+        description: URL that must answer 2xx after the deploy. Defaults to the environment's HEALTHCHECK_URL.
+        type: string
+        default: ''
+    outputs:
+      image:
+        description: Pushed image reference (name:tree-<git tree>).
+        value: ${{ jobs.image.outputs.image }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Export build-time variables
+        if: inputs.build-env != ''
+        env:
+          BUILD_ENV: ${{ inputs.build-env }}
+        run: printf '%s\n' "$BUILD_ENV" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' >> "$GITHUB_ENV" || true
+
+      - run: npm ci
+
+      - if: inputs.typecheck
+        run: npm run typecheck
+
+      - run: npm run build
+
+  image:
+    needs: verify
+    if: inputs.push-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: ref
+        name: Resolve image reference
+        env:
+          IMAGE_NAME: ${{ inputs.image-name || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          name="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          tree="$(git rev-parse --short=12 'HEAD^{tree}')"
+          {
+            echo "name=$name"
+            echo "sha=sha-${GITHUB_SHA::7}"
+            echo "tree=tree-$tree"
+            echo "image=$name:tree-$tree"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: existing
+        name: Reuse the image if this tree was already built
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$IMAGE already exists (same content built before): reusing it."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        if: steps.existing.outputs.found == 'false'
+        with:
+          images: ${{ steps.ref.outputs.name }}
+          tags: |
+            type=raw,value=${{ steps.ref.outputs.tree }}
+            type=raw,value=${{ steps.ref.outputs.sha }}
+
+      - uses: docker/build-push-action@v6
+        if: steps.existing.outputs.found == 'false'
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ inputs.build-env }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag the reused image with this commit
+        if: steps.existing.outputs.found == 'true'
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+          SHA_TAG: ${{ steps.ref.outputs.name }}:${{ steps.ref.outputs.sha }}
+        run: docker buildx imagetools create -t "$SHA_TAG" "$IMAGE"
+
+  deploy:
+    needs: image
+    if: inputs.push-image && inputs.deploy
+    uses: ./.github/workflows/deploy-compose.yml
+    with:
+      image: ${{ needs.image.outputs.image }}
+      environment: ${{ inputs.environment }}
+      compose-dir: ${{ inputs.compose-dir }}
+      compose-service: ${{ inputs.compose-service }}
+      tag-variable: ${{ inputs.tag-variable }}
+      healthcheck-url: ${{ inputs.healthcheck-url }}
+    secrets: inherit
