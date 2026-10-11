@@ -1,0 +1,176 @@
+# Reusable deploy of an already-published image to a Docker Compose service over SSH.
+# Used by docusaurus-portal.yml (deploy after build) and promote-image.yml (promotion), and
+# callable on its own for any project that runs on the same kind of server.
+#
+#   1. Skips (without failing) unless the environment variable DEPLOY_ENABLED is `true`.
+#   2. Writes the image tag into the compose project's .env (`tag-variable=<tag>`), so a
+#      manual `docker compose up -d` keeps this exact version.
+#   3. `docker compose pull` + `up -d --no-deps` of that single service.
+#   4. Optional health check (input, or the environment variable HEALTHCHECK_URL).
+#   5. Tags the image `<environment>` and `<environment>-sha-<commit>` in the registry, so the
+#      registry always shows what is actually running (cleanup-images.yml keeps these).
+#
+# The compose directory also falls back to an environment variable (COMPOSE_DIR), so two
+# environments on the same server never share a compose project by accident.
+#
+# Server contract: see README.
+
+name: Deploy compose service
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Full image reference to deploy (name:tag). Only the tag is written to the server.
+        type: string
+        required: true
+      environment:
+        description: GitHub environment with the DEPLOY_* secrets and variables.
+        type: string
+        required: true
+      compose-dir:
+        description: Directory on the server with the compose project. Defaults to the environment variable COMPOSE_DIR, then /opt/stack.
+        type: string
+        default: ''
+      compose-service:
+        description: Compose service to update.
+        type: string
+        required: true
+      tag-variable:
+        description: Variable the compose file reads the image tag from.
+        type: string
+        default: IMAGE_TAG
+      healthcheck-url:
+        description: URL that must answer 2xx after the deploy. Falls back to the environment variable HEALTHCHECK_URL; empty to skip.
+        type: string
+        default: ''
+    secrets:
+      DEPLOY_HOST:
+        required: false
+      DEPLOY_USER:
+        required: false
+      DEPLOY_SSH_KEY:
+        description: Private key authorized on the server for DEPLOY_USER.
+        required: false
+      DEPLOY_KNOWN_HOSTS:
+        description: Output of `ssh-keyscan <host>`, to pin the server's host key.
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write
+    # One deploy at a time per environment and service; a newer one waits instead of racing.
+    concurrency:
+      group: deploy-${{ inputs.environment }}-${{ inputs.compose-service }}
+      cancel-in-progress: false
+    steps:
+      - id: gate
+        name: Check DEPLOY_ENABLED
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ "$DEPLOY_ENABLED" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy skipped: DEPLOY_ENABLED is not 'true' in environment '$ENVIRONMENT'."
+          fi
+
+      - name: Check deploy configuration
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          missing=()
+          [ -n "$DEPLOY_HOST" ] || missing+=(DEPLOY_HOST)
+          [ -n "$DEPLOY_USER" ] || missing+=(DEPLOY_USER)
+          [ -n "$DEPLOY_SSH_KEY" ] || missing+=(DEPLOY_SSH_KEY)
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing deploy secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull and restart the service
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DIR: ${{ inputs.compose-dir || vars.COMPOSE_DIR || '/opt/stack' }}
+          SERVICE: ${{ inputs.compose-service }}
+          TAG_VARIABLE: ${{ inputs.tag-variable }}
+          IMAGE: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          tag="${IMAGE##*:}"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- \
+            "$DIR" "$SERVICE" "$TAG_VARIABLE" "$tag" <<'REMOTE'
+          set -euo pipefail
+          dir="$1"; service="$2"; variable="$3"; tag="$4"
+          cd "$dir"
+          touch .env
+          if grep -q "^${variable}=" .env; then
+            sed -i "s|^${variable}=.*|${variable}=${tag}|" .env
+          else
+            echo "${variable}=${tag}" >> .env
+          fi
+          docker compose pull "$service"
+          docker compose up -d --no-deps "$service"
+          docker image prune -f > /dev/null
+          REMOTE
+          echo "Deployed \`$IMAGE\` to \`$ENVIRONMENT\` as compose service \`$SERVICE\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Health check
+        if: steps.gate.outputs.enabled == 'true' && (inputs.healthcheck-url != '' || vars.HEALTHCHECK_URL != '')
+        env:
+          URL: ${{ inputs.healthcheck-url || vars.HEALTHCHECK_URL }}
+        run: |
+          for attempt in $(seq 1 10); do
+            if curl -fsS -o /dev/null "$URL"; then
+              echo "Healthy: $URL"
+              exit 0
+            fi
+            echo "Attempt $attempt: $URL not healthy yet"
+            sleep 6
+          done
+          echo "::error::$URL did not answer 2xx after the deploy"
+          exit 1
+
+      - name: Mark the image as deployed
+        if: steps.gate.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag the image with the environment
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          IMAGE: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          name="${IMAGE%:*}"
+          docker buildx imagetools create \
+            -t "$name:$ENVIRONMENT" \
+            -t "$name:$ENVIRONMENT-sha-${GITHUB_SHA::7}" \
+            "$IMAGE"
