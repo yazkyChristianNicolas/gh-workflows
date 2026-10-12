@@ -1,10 +1,13 @@
 {
   "repository": "yazkyChristianNicolas/berlinesa-developers-platform",
-  "branches": {
-    "development": "development",
-    "production": "main"
-  },
-  "required_checks": ["portal / verify"],
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "portal / verify"
+  ],
   "required_approvals": 0,
   "environments": {
     "development": {

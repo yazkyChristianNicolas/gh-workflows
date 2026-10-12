@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Configures a repository for the build-once / promote deploy flow (see the README in this
-# directory): branches, default branch, rulesets, Actions permissions, environments with
-# their variables and branch policies, and secrets.
+# directory):
+#
+#   feature/*  --PR-->  development  --PR-->  main
+#                       deploys to the        deploys to the
+#                       `development` env     `production` env
+#
+# Default branch, rulesets, Actions permissions, environments (each tied to the branch that
+# deploys to it) with their variables, and secrets.
 #
 # Idempotent: it converges the repository to what the config says, so it can be re-run
 # after editing the config. The config is the source of truth: values changed by hand in
@@ -34,8 +40,7 @@ command -v jq > /dev/null || { echo "jq is required" >&2; exit 1; }
 cfg() { jq -r "$1" "$CONFIG"; }
 
 REPO="$(cfg '.repository')"
-PROD_BRANCH="$(cfg '.branches.production // "main"')"
-DEV_BRANCH="$(cfg '.branches.development // "development"')"
+DEFAULT_BRANCH="$(cfg '.default_branch // "development"')"
 
 step() { printf '\n== %s\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -82,19 +87,20 @@ gh api "repos/$REPO" --jq .full_name > /dev/null \
 echo "Configuring $REPO$($DRY_RUN && echo ' (dry run)')"
 
 # ---------------------------------------------------------------------------
-step "Branches: $DEV_BRANCH (default) and $PROD_BRANCH"
+step "Default branch: $DEFAULT_BRANCH"
 
-if gh api "repos/$REPO/branches/$DEV_BRANCH" > /dev/null 2>&1; then
-  info "$DEV_BRANCH exists"
+if gh api "repos/$REPO/branches/$DEFAULT_BRANCH" > /dev/null 2>&1; then
+  info "$DEFAULT_BRANCH exists"
 else
-  sha="$(gh api "repos/$REPO/git/ref/heads/$PROD_BRANCH" --jq .object.sha)"
-  info "creating $DEV_BRANCH from $PROD_BRANCH ($sha)"
-  api_json POST "repos/$REPO/git/refs" <<< "{\"ref\": \"refs/heads/$DEV_BRANCH\", \"sha\": \"$sha\"}"
+  current="$(gh api "repos/$REPO" --jq .default_branch)"
+  sha="$(gh api "repos/$REPO/git/ref/heads/$current" --jq .object.sha)"
+  info "creating $DEFAULT_BRANCH from $current ($sha)"
+  api_json POST "repos/$REPO/git/refs" <<< "{\"ref\": \"refs/heads/$DEFAULT_BRANCH\", \"sha\": \"$sha\"}"
 fi
 
-jq -n --arg branch "$DEV_BRANCH" '{ default_branch: $branch, delete_branch_on_merge: true }' \
+jq -n --arg branch "$DEFAULT_BRANCH" '{ default_branch: $branch, delete_branch_on_merge: true }' \
   | api_json PATCH "repos/$REPO"
-info "default branch $DEV_BRANCH, delete branches after merge"
+info "default branch $DEFAULT_BRANCH (new PRs target it), delete branches after merge"
 
 # ---------------------------------------------------------------------------
 step "Rulesets"
@@ -135,8 +141,9 @@ upsert_ruleset() {
 }
 
 if gh api "repos/$REPO/rulesets" > /dev/null 2>&1; then
-  upsert_ruleset "$DEV_BRANCH"
-  upsert_ruleset "$PROD_BRANCH"
+  for branch in $(cfg '.protected_branches // [] | .[]'); do
+    upsert_ruleset "$branch"
+  done
 else
   info "SKIPPED: rulesets are not available for this repository (private repos need GitHub Pro)"
 fi

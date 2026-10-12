@@ -2,7 +2,16 @@
 
 Configures a repository for the build-once / promote flow of this repo's workflows
 (`docusaurus-portal.yml`, `promote-image.yml`, `deploy-compose.yml`), so a new project
-doesn't need the setup done by hand in the GitHub UI.
+doesn't need the setup done by hand in the GitHub UI:
+
+```
+feature/*  --PR-->  development  --PR-->  main
+                    deploys to the        deploys to the
+                    `development` env     `production` env
+```
+
+There are only two long-lived branches, `development` and `main`. `development` and
+`production` are the names of the GitHub **environments** each branch deploys to.
 
 ```bash
 ./setup-repo.sh configs/<project>.json --dry-run   # shows what it would change
@@ -19,10 +28,10 @@ Requires `gh` (logged in as a user with admin access to the repository) and `jq`
 
 | Area | What |
 |---|---|
-| Branches | Creates the development branch from the production one if missing; makes it the default branch; deletes branches after merge. |
-| Rulesets | `protect-<branch>` for both branches: PR required (with `required_approvals`), `required_checks` must pass, no force push, no deletion. Private repositories need GitHub Pro (skipped with a warning otherwise). |
+| Default branch | Creates `default_branch` from the current default branch if missing, makes it the default (new PRs target it) and deletes branches after merge. |
+| Rulesets | `protect-<branch>` for each of `protected_branches`: PR required (with `required_approvals`), `required_checks` must pass, no force push, no deletion. Private repositories need GitHub Pro (skipped with a warning otherwise). |
 | Actions | `GITHUB_TOKEN` read-only by default (the workflows request what they need); Actions may open pull requests. |
-| Environments | One per entry in `environments`: deploys allowed only from its `branch`, optional required `reviewers`, its `variables` and `secrets`. |
+| Environments | One per entry in `environments`, tied to the `branch` that deploys to it (deploys from any other branch are rejected), optional required `reviewers`, its `variables` and `secrets`. |
 | Repository | `variables` and `secrets`. |
 
 ## Config
@@ -30,7 +39,8 @@ Requires `gh` (logged in as a user with admin access to the repository) and `jq`
 ```json
 {
   "repository": "owner/repo",
-  "branches": { "development": "development", "production": "main" },
+  "default_branch": "development",
+  "protected_branches": ["development", "main"],
   "required_checks": ["portal / verify"],
   "required_approvals": 0,
   "environments": {
