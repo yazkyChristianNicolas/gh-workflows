@@ -25,7 +25,7 @@ on:
       keep-tags:
         description: Regex; versions with any tag matching it are always kept.
         type: string
-        default: '^(development|production)$'
+        default: '^(development|production)(-.+)?$'
       keep-last:
         description: Number of most recent tagged versions to keep.
         type: number

@@ -5,10 +5,12 @@
 #   1. Skips (without failing) unless the environment variable DEPLOY_ENABLED is `true`.
 #   2. Writes the image tag into the compose project's .env (`tag-variable=<tag>`), so a
 #      manual `docker compose up -d` keeps this exact version.
-#   3. `docker compose pull` + `up -d --no-deps` of that single service.
+#   3. Optionally runs a one-shot service first (`pre-deploy-service`, e.g. migrations), then
+#      `docker compose pull` + `up -d --no-deps` of that single service.
 #   4. Optional health check (input, or the environment variable HEALTHCHECK_URL).
-#   5. Tags the image `<environment>` and `<environment>-sha-<commit>` in the registry, so the
-#      registry always shows what is actually running (cleanup-images.yml keeps these).
+#   5. Tags the image `<environment>` and `<environment>-sha-<commit>` in the registry (and
+#      `<environment>-<suffix>` for each of `tag-suffixes`), so the registry always shows what
+#      is actually running (cleanup-images.yml keeps these).
 #
 # The compose directory also falls back to an environment variable (COMPOSE_DIR), so two
 # environments on the same server never share a compose project by accident.
@@ -36,6 +38,14 @@ on:
         description: Compose service to update.
         type: string
         required: true
+      pre-deploy-service:
+        description: Compose service run once (`docker compose run --rm`) before updating compose-service, e.g. `migrate`. Uses the same tag variable.
+        type: string
+        default: ''
+      tag-suffixes:
+        description: Suffixes of sibling images built from the same tree (e.g. `migrate` for `tree-<x>-migrate`), one per line. They get the environment tag too.
+        type: string
+        default: ''
       tag-variable:
         description: Variable the compose file reads the image tag from.
         type: string
@@ -120,18 +130,23 @@ jobs:
           TAG_VARIABLE: ${{ inputs.tag-variable }}
           IMAGE: ${{ inputs.image }}
           ENVIRONMENT: ${{ inputs.environment }}
+          PRE_DEPLOY: ${{ inputs.pre-deploy-service }}
         run: |
           tag="${IMAGE##*:}"
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- \
-            "$DIR" "$SERVICE" "$TAG_VARIABLE" "$tag" <<'REMOTE'
+            "$DIR" "$SERVICE" "$TAG_VARIABLE" "$tag" "$PRE_DEPLOY" <<'REMOTE'
           set -euo pipefail
-          dir="$1"; service="$2"; variable="$3"; tag="$4"
+          dir="$1"; service="$2"; variable="$3"; tag="$4"; pre="${5:-}"
           cd "$dir"
           touch .env
           if grep -q "^${variable}=" .env; then
             sed -i "s|^${variable}=.*|${variable}=${tag}|" .env
           else
             echo "${variable}=${tag}" >> .env
+          fi
+          if [ -n "$pre" ]; then
+            docker compose pull "$pre"
+            docker compose run --rm --no-deps "$pre"
           fi
           docker compose pull "$service"
           docker compose up -d --no-deps "$service"
@@ -168,9 +183,14 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}
           ENVIRONMENT: ${{ inputs.environment }}
+          SUFFIXES: ${{ inputs.tag-suffixes }}
         run: |
           name="${IMAGE%:*}"
           docker buildx imagetools create \
             -t "$name:$ENVIRONMENT" \
             -t "$name:$ENVIRONMENT-sha-${GITHUB_SHA::7}" \
             "$IMAGE"
+          while IFS= read -r suffix; do
+            [ -n "$suffix" ] || continue
+            docker buildx imagetools create -t "$name:$ENVIRONMENT-$suffix" "$IMAGE-$suffix"
+          done <<< "$SUFFIXES"
