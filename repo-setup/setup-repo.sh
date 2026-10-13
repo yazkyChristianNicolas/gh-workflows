@@ -169,11 +169,13 @@ for env in $(cfg '.environments // {} | keys[]'); do
     reviewer_objects="$(jq -c --argjson id "$uid" '. + [{ type: "User", id: $id }]' <<< "$reviewer_objects")"
   done
 
+  # `reviewers` only when there are any: an empty list makes GitHub try to create the
+  # required-reviewers rule and fail with 422 on plans/repos without it.
   jq -n --argjson reviewers "$reviewer_objects" --arg branch "$branch" '{
-    reviewers: $reviewers,
     deployment_branch_policy: (if $branch == "" then null
       else { protected_branches: false, custom_branch_policies: true } end)
-  }' | api_json PUT "repos/$REPO/environments/$env"
+  } + (if ($reviewers | length) > 0 then { reviewers: $reviewers } else {} end)' \
+    | api_json PUT "repos/$REPO/environments/$env"
 
   if [ -n "$branch" ]; then
     existing="$(gh api "repos/$REPO/environments/$env/deployment-branch-policies" \
