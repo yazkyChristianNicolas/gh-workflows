@@ -71,6 +71,17 @@ jobs:
             base="users/$owner/packages/container/$package/versions"
           fi
 
+          # A repo that has not pushed any image yet has no package: nothing to clean.
+          if ! probe="$(gh api "$base?per_page=1" 2>&1)"; then
+            if grep -q "Package not found" <<< "$probe"; then
+              echo "::notice::$image has no package yet (no image pushed): nothing to clean."
+              echo "No package for \`$image\` yet: nothing to clean." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "$probe" >&2
+            exit 1
+          fi
+
           gh api --paginate "$base?per_page=100" --jq '.[]' | jq -s '.' > versions.json
 
           # Root decisions: why each version is kept (null = candidate for deletion).
