@@ -13,7 +13,7 @@
     "development": {
       "branch": "development",
       "variables": {
-        "DEPLOY_ENABLED": "true",
+        "DEPLOY_ENABLED": "false",
         "COMPOSE_DIR": "/opt/stack-dev",
         "HEALTHCHECK_URL": "https://dev-developers.berlinesa.app/llms.txt"
       }
