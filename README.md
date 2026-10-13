@@ -10,6 +10,7 @@ Reusable GitHub Actions workflows, callable from any of my repos.
 | `node-ts.yml` | Node 20 + TypeScript | push to main, PR |
 | `docker-publish.yml` | Docker + GHCR | push tags `v*` |
 | `docusaurus-portal.yml` | Docusaurus docs portal: verify + build image once + optional deploy | PR, push to `development` |
+| `container-image.yml` | Any app with a Dockerfile: build once (main + extra targets) + optional deploy; verification stays in the caller | push to `development` |
 | `promote-image.yml` | Any image built with the `tree-` convention: promote without rebuilding | push to `main` |
 | `deploy-compose.yml` | Deploy an image to a Docker Compose service over SSH | called by the two above (or directly) |
 | `cleanup-images.yml` | GHCR retention: keep environment tags + last N, delete the rest | schedule (e.g. weekly) |
@@ -109,6 +110,52 @@ jobs:
     secrets: inherit
 ```
 
+### `container-image.yml` (any app with a Dockerfile)
+
+Same build-once flow for apps that are not Docusaurus (NestJS, Next.js, Python). The caller
+runs its own verification jobs and makes the image job depend on them:
+
+```yaml
+# .github/workflows/development.yml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: npm }
+      - run: npm ci && npm run lint && npm test
+
+  image:
+    needs: verify
+    if: github.event_name != 'pull_request'
+    uses: yazkyChristianNicolas/gh-workflows/.github/workflows/container-image.yml@main
+    with:
+      target: runtime            # Dockerfile stage of the app
+      extra-targets: migrate     # pushed as tree-<x>-migrate from the same tree
+      push-image: true
+      deploy: true
+      environment: development
+      compose-service: arca-api
+      pre-deploy-service: migrate   # `docker compose run --rm migrate` before updating arca-api
+      tag-variable: ARCA_API_TAG
+    secrets: inherit
+```
+
+| Input | Default | Description |
+|---|---|---|
+| `image-name` | `ghcr.io/<owner>/<repo>` | Image name without tag. |
+| `context` / `dockerfile` | `.` / `Dockerfile` | Build context and Dockerfile. |
+| `target` | last stage | Dockerfile target of the main image. |
+| `extra-targets` | `''` | Other targets of the same tree, one per line; pushed as `tree-<x>-<target>`, promoted and environment-tagged together with the main image. |
+| `build-args` | `''` | `KEY=VALUE` per line, identical for every environment. |
+| `push-image`, `deploy`, `environment` | | As in `docusaurus-portal.yml`. |
+| `pre-deploy-service` | `''` | Compose service run once before the update (e.g. migrations). In the compose file it reads the same tag variable: `image: <image>:${ARCA_API_TAG:-development}-migrate`. |
+| `compose-dir`, `compose-service`, `tag-variable`, `healthcheck-url` | | Passed to `deploy-compose.yml`. |
+
+`promote-image.yml` takes the same `extra-targets` and `pre-deploy-service`, so production
+checks and deploys the same set of images.
+
 ### `docusaurus-portal.yml` inputs
 
 | Input | Default | Description |
@@ -139,6 +186,8 @@ jobs:
 | `compose-dir` | environment variable `COMPOSE_DIR`, then `/opt/stack` | Compose project directory on the server. |
 | `compose-service` | — | Compose service to update. |
 | `tag-variable` | `IMAGE_TAG` | Variable the compose file reads the image tag from. Use one per service. |
+| `pre-deploy-service` | `''` | Compose service run once (`docker compose run --rm --no-deps`) before updating `compose-service`. |
+| `tag-suffixes` | `''` | Sibling images (`<image>-<suffix>`) that also get the environment tag. |
 | `healthcheck-url` | environment variable `HEALTHCHECK_URL` | URL that must answer 2xx after the deploy (10 attempts, 6 s apart). Empty to skip. |
 
 ### Per-environment configuration
@@ -249,7 +298,7 @@ jobs:
 | Input | Default | Description |
 |---|---|---|
 | `package-name` | repository name | GHCR package (image name without owner). |
-| `keep-tags` | `^(development\|production)$` | Regex; versions with any matching tag are always kept. |
+| `keep-tags` | `^(development\|production)(-.+)?$` | Regex; versions with any matching tag are always kept. |
 | `keep-last` | `10` | Most recent tagged versions to keep. |
 | `keep-recent-hours` | `24` | Versions younger than this are always kept. |
 | `dry-run` | `false` | Print the plan without deleting. |

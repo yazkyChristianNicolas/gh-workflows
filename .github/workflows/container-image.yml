@@ -1,0 +1,176 @@
+# Reusable build-once pipeline for any app packaged as a Docker image (NestJS, Next.js,
+# Python, ...). Verification is the caller's job: run your own lint/test jobs and make the
+# job that calls this one depend on them (`needs:`).
+#
+#   image  -> docker build + push to GHCR, tagged `tree-<git tree>` (+ `sha-<commit>`).
+#             Extra Dockerfile targets (e.g. a one-shot `migrate` image) are built from the
+#             same tree and tagged `tree-<git tree>-<target>`. If the tree was already built,
+#             the images are reused instead of rebuilt.
+#   deploy -> optional, through deploy-compose.yml, to the given environment.
+#
+# Build once, promote everywhere: the image must not bake environment-specific values (read
+# them at container start). promote-image.yml finds these images on the production branch
+# by the same `tree-` tag.
+
+name: Container image
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Image name without tag. Defaults to ghcr.io/<owner>/<repo>.
+        type: string
+        default: ''
+      context:
+        description: Docker build context.
+        type: string
+        default: .
+      dockerfile:
+        description: Path to the Dockerfile.
+        type: string
+        default: Dockerfile
+      target:
+        description: Dockerfile target of the main image. Empty = the last stage.
+        type: string
+        default: ''
+      extra-targets:
+        description: >-
+          Other Dockerfile targets to build from the same tree, one per line (e.g. `migrate`).
+          Each is pushed as `<image>:tree-<git tree>-<target>`.
+        type: string
+        default: ''
+      build-args:
+        description: Build args, KEY=VALUE per line. Must be the same for every environment.
+        type: string
+        default: ''
+      push-image:
+        description: Build and push the image(s) to GHCR.
+        type: boolean
+        default: false
+      deploy:
+        description: Deploy the pushed image to `environment`. Requires push-image.
+        type: boolean
+        default: false
+      environment:
+        description: GitHub environment to deploy to (see deploy-compose.yml).
+        type: string
+        default: development
+      compose-dir:
+        description: Directory on the server with the compose project. Defaults to the environment variable COMPOSE_DIR, then /opt/stack.
+        type: string
+        default: ''
+      compose-service:
+        description: Compose service to update on deploy.
+        type: string
+        default: ''
+      pre-deploy-service:
+        description: Compose service run once (`docker compose run --rm`) before updating compose-service, e.g. `migrate`.
+        type: string
+        default: ''
+      tag-variable:
+        description: Variable the compose file reads the image tag from.
+        type: string
+        default: IMAGE_TAG
+      healthcheck-url:
+        description: URL that must answer 2xx after the deploy. Defaults to the environment's HEALTHCHECK_URL.
+        type: string
+        default: ''
+    outputs:
+      image:
+        description: Pushed main image reference (name:tree-<git tree>).
+        value: ${{ jobs.image.outputs.image }}
+
+jobs:
+  image:
+    if: inputs.push-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: ref
+        name: Resolve image reference
+        env:
+          IMAGE_NAME: ${{ inputs.image-name || format('ghcr.io/{0}', github.repository) }}
+        run: |
+          name="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          tree="$(git rev-parse --short=12 'HEAD^{tree}')"
+          {
+            echo "name=$name"
+            echo "tree=tree-$tree"
+            echo "sha=sha-${GITHUB_SHA::7}"
+            echo "image=$name:tree-$tree"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Exposes ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN so `docker buildx build` can use the
+      # GitHub Actions cache from a plain run step.
+      - uses: crazy-max/ghaction-github-runtime@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One line per image: "<target or empty>\t<tag suffix>". The main image has no suffix.
+      - name: Build or reuse every image of this tree
+        env:
+          NAME: ${{ steps.ref.outputs.name }}
+          TREE: ${{ steps.ref.outputs.tree }}
+          SHA: ${{ steps.ref.outputs.sha }}
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          TARGET: ${{ inputs.target }}
+          EXTRA_TARGETS: ${{ inputs.extra-targets }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && args+=(--build-arg "$line")
+          done <<< "$BUILD_ARGS"
+
+          build() {
+            local target="$1" suffix="$2"
+            local ref="$NAME:$TREE$suffix"
+            if docker buildx imagetools inspect "$ref" > /dev/null 2>&1; then
+              echo "::notice::$ref already exists (same content built before): reusing it."
+              docker buildx imagetools create -t "$NAME:$SHA$suffix" "$ref"
+              return
+            fi
+            local target_args=()
+            [ -n "$target" ] && target_args=(--target "$target")
+            docker buildx build "$CONTEXT" --file "$DOCKERFILE" "${target_args[@]}" "${args[@]}" \
+              --tag "$ref" --tag "$NAME:$SHA$suffix" \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --cache-from type=gha --cache-to type=gha,mode=max \
+              --push
+            echo "Pushed \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          build "$TARGET" ""
+          while IFS= read -r extra; do
+            [ -n "$extra" ] && build "$extra" "-$extra"
+          done <<< "$EXTRA_TARGETS"
+
+  deploy:
+    needs: image
+    if: inputs.push-image && inputs.deploy
+    uses: ./.github/workflows/deploy-compose.yml
+    with:
+      image: ${{ needs.image.outputs.image }}
+      environment: ${{ inputs.environment }}
+      compose-dir: ${{ inputs.compose-dir }}
+      compose-service: ${{ inputs.compose-service }}
+      pre-deploy-service: ${{ inputs.pre-deploy-service }}
+      tag-suffixes: ${{ inputs.extra-targets }}
+      tag-variable: ${{ inputs.tag-variable }}
+      healthcheck-url: ${{ inputs.healthcheck-url }}
+    secrets: inherit

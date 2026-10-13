@@ -32,6 +32,14 @@ on:
         description: Compose service to update.
         type: string
         required: true
+      extra-targets:
+        description: Sibling images built from the same tree (e.g. `migrate`), one per line. They must exist too.
+        type: string
+        default: ''
+      pre-deploy-service:
+        description: Compose service run once before updating compose-service (see deploy-compose.yml).
+        type: string
+        default: ''
       tag-variable:
         description: Variable the compose file reads the image tag from.
         type: string
@@ -78,11 +86,14 @@ jobs:
         env:
           IMAGE: ${{ steps.ref.outputs.image }}
           ENVIRONMENT: ${{ inputs.environment }}
+          EXTRA_TARGETS: ${{ inputs.extra-targets }}
         run: |
-          if ! docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "::error::$IMAGE does not exist: this content was never built by the build pipeline. Merge it through the development branch first."
-            exit 1
-          fi
+          for ref in "$IMAGE" $(printf '%s\n' "$EXTRA_TARGETS" | sed '/^$/d; s|^|'"$IMAGE"'-|'); do
+            if ! docker buildx imagetools inspect "$ref" > /dev/null 2>&1; then
+              echo "::error::$ref does not exist: this content was never built by the build pipeline. Merge it through the development branch first."
+              exit 1
+            fi
+          done
           echo "Promoting $IMAGE"
           echo "Promoting \`$IMAGE\` to \`$ENVIRONMENT\`." >> "$GITHUB_STEP_SUMMARY"
 
@@ -94,6 +105,8 @@ jobs:
       environment: ${{ inputs.environment }}
       compose-dir: ${{ inputs.compose-dir }}
       compose-service: ${{ inputs.compose-service }}
+      pre-deploy-service: ${{ inputs.pre-deploy-service }}
+      tag-suffixes: ${{ inputs.extra-targets }}
       tag-variable: ${{ inputs.tag-variable }}
       healthcheck-url: ${{ inputs.healthcheck-url }}
     secrets: inherit
