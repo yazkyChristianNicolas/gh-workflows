@@ -1,0 +1,32 @@
+{
+  "repository": "yazkyChristianNicolas/berlinesa-mcp",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [],
+  "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "false",
+        "COMPOSE_DIR": "/opt/stack-dev"
+      }
+    },
+    "production": {
+      "branch": "main",
+      "variables": {
+        "DEPLOY_ENABLED": "false",
+        "COMPOSE_DIR": "/opt/stack"
+      }
+    }
+  },
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS"
+  ]
+}
