@@ -14,6 +14,12 @@ Reusable GitHub Actions workflows, callable from any of my repos.
 | `deploy-compose.yml` | Deploy an image to a Docker Compose service over SSH | called by the two above (or directly) |
 | `cleanup-images.yml` | GHCR retention: keep environment tags + last N, delete the rest | schedule (e.g. weekly) |
 
+## Repository setup
+
+`repo-setup/setup-repo.sh` configures branches, rulesets, Actions permissions, environments,
+variables and secrets of a repository from a JSON config. See
+[`repo-setup/README.md`](repo-setup/README.md).
+
 ## Usage
 
 ```yaml

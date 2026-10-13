@@ -1,0 +1,42 @@
+{
+  "repository": "yazkyChristianNicolas/berlinesa-developers-platform",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "portal / verify"
+  ],
+  "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "true",
+        "COMPOSE_DIR": "/opt/stack-dev",
+        "HEALTHCHECK_URL": "https://dev-developers.berlinesa.app/llms.txt"
+      }
+    },
+    "production": {
+      "branch": "main",
+      "reviewers": [],
+      "variables": {
+        "DEPLOY_ENABLED": "false",
+        "COMPOSE_DIR": "/opt/stack",
+        "HEALTHCHECK_URL": "https://developers.berlinesa.app/llms.txt"
+      }
+    }
+  },
+  "variables": {
+    "API_NUMBER": "1",
+    "OPENAPI_SERVER_URL": "https://api.berlinesa.app"
+  },
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS",
+    "SERVICE_REPO_TOKEN"
+  ]
+}
