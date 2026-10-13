@@ -298,7 +298,7 @@ jobs:
 | Input | Default | Description |
 |---|---|---|
 | `package-name` | repository name | GHCR package (image name without owner). |
-| `keep-tags` | `^(development\|production)$` | Regex; versions with any matching tag are always kept. |
+| `keep-tags` | `^(development\|production)(-.+)?$` | Regex; versions with any matching tag are always kept. |
 | `keep-last` | `10` | Most recent tagged versions to keep. |
 | `keep-recent-hours` | `24` | Versions younger than this are always kept. |
 | `dry-run` | `false` | Print the plan without deleting. |
