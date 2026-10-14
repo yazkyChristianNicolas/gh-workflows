@@ -146,7 +146,9 @@ jobs:
           fi
           if [ -n "$pre" ]; then
             docker compose pull "$pre"
-            docker compose run --rm --no-deps "$pre"
+            # -T and </dev/null: this script arrives on stdin (`bash -s`); otherwise `compose run`
+            # reads it and swallows the rest (the service `up` never runs).
+            docker compose run --rm --no-deps -T "$pre" < /dev/null
           fi
           docker compose pull "$service"
           docker compose up -d --no-deps "$service"
