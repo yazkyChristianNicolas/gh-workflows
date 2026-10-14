@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           args=()
           while IFS= read -r line; do
-            [ -n "$line" ] && args+=(--build-arg "$line")
+            if [ -n "$line" ]; then args+=(--build-arg "$line"); fi
           done <<< "$BUILD_ARGS"
 
           build() {
@@ -156,8 +156,10 @@ jobs:
           }
 
           build "$TARGET" ""
+          # `if`, not `[ ] && build`: with no extra targets the loop still reads one empty line,
+          # and a false `[ ]` as the last command would fail the step.
           while IFS= read -r extra; do
-            [ -n "$extra" ] && build "$extra" "-$extra"
+            if [ -n "$extra" ]; then build "$extra" "-$extra"; fi
           done <<< "$EXTRA_TARGETS"
 
   deploy:
