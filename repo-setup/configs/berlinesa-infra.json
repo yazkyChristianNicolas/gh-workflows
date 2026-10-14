@@ -1,0 +1,18 @@
+{
+  "repository": "yazkyChristianNicolas/berlinesa-infra",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "validate"
+  ],
+  "required_approvals": 0,
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS"
+  ]
+}

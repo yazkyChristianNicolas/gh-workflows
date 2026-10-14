@@ -1,0 +1,36 @@
+{
+  "repository": "yazkyChristianNicolas/arca-invoicing-service",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "verify"
+  ],
+  "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "true",
+        "COMPOSE_DIR": "/opt/stack-dev",
+        "HEALTHCHECK_URL": "https://dev-api.berlinesa.com.ar/health"
+      }
+    },
+    "production": {
+      "branch": "main",
+      "variables": {
+        "DEPLOY_ENABLED": "false",
+        "COMPOSE_DIR": "/opt/stack",
+        "HEALTHCHECK_URL": "https://api.berlinesa.com.ar/health"
+      }
+    }
+  },
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS"
+  ]
+}

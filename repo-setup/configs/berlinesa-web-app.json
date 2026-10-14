@@ -1,0 +1,37 @@
+{
+  "repository": "yazkyChristianNicolas/berlinesa-web-app",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "checks",
+    "e2e"
+  ],
+  "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "true",
+        "COMPOSE_DIR": "/opt/stack-dev",
+        "HEALTHCHECK_URL": "https://dev-app.berlinesa.com.ar/login"
+      }
+    },
+    "production": {
+      "branch": "main",
+      "variables": {
+        "DEPLOY_ENABLED": "false",
+        "COMPOSE_DIR": "/opt/stack",
+        "HEALTHCHECK_URL": "https://app.berlinesa.com.ar/login"
+      }
+    }
+  },
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS"
+  ]
+}
