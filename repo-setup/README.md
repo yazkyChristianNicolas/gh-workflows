@@ -24,6 +24,21 @@ is in the config is overwritten on the next run (e.g. `DEPLOY_ENABLED`).
 
 Requires `gh` (logged in as a user with admin access to the repository) and `jq`.
 
+## New project in one command
+
+`new-project.sh` creates the repository, writes the `development.yml` / `production.yml`
+callers, generates `configs/<repo>.json` and runs `setup-repo.sh`:
+
+```bash
+./new-project.sh owner/my-app --domain example.com --sub app \
+  --compose-service my-app --tag-variable MY_APP_TAG --stack node --dry-run   # shows everything
+./new-project.sh owner/my-app --domain example.com --sub app \
+  --compose-service my-app --tag-variable MY_APP_TAG --stack node
+```
+
+It checks that all secrets are in `secrets.env` before creating anything, and it is idempotent.
+It does not generate the Dockerfile nor the server's compose/Caddy blocks.
+
 ## What it configures
 
 | Area | What |
