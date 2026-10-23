@@ -9,6 +9,15 @@
     "validate"
   ],
   "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "true",
+        "COMPOSE_DIR": "/opt/stack-dev"
+      }
+    }
+  },
   "secrets": [
     "DEPLOY_HOST",
     "DEPLOY_USER",

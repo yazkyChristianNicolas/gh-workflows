@@ -1,0 +1,28 @@
+{
+  "repository": "yazkyChristianNicolas/berlinesa-keycloak",
+  "default_branch": "development",
+  "protected_branches": [
+    "development",
+    "main"
+  ],
+  "required_checks": [
+    "login-theme"
+  ],
+  "required_approvals": 0,
+  "environments": {
+    "development": {
+      "branch": "development",
+      "variables": {
+        "DEPLOY_ENABLED": "true",
+        "COMPOSE_DIR": "/opt/stack-dev",
+        "HEALTHCHECK_URL": "https://dev-auth.berlinesa.com.ar/realms/berlinesa/.well-known/openid-configuration"
+      }
+    }
+  },
+  "secrets": [
+    "DEPLOY_HOST",
+    "DEPLOY_USER",
+    "DEPLOY_SSH_KEY",
+    "DEPLOY_KNOWN_HOSTS"
+  ]
+}
