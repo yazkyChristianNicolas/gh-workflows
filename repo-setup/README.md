@@ -95,6 +95,22 @@ DEPLOY_SSH_KEY=@~/.ssh/berlinesa_deploy       # @path: read the value from a fil
 The same file serves every repository, so adding a project is: write its config, run the
 script. Keep the file readable only by you (`chmod 600`).
 
+### Rotating or loading a secret: `set-secret.sh`
+
+```bash
+./set-secret.sh SERVICE_REPO_TOKEN --check      # does the stored token still work? when does it expire?
+./set-secret.sh SERVICE_REPO_TOKEN              # prompts (no echo), verifies, saves, uploads
+./set-secret.sh SERVICE_REPO_TOKEN --dry-run    # shows what it would do
+```
+
+It asks for the value without echo, saves it in `secrets.env` (replacing only that line) and
+runs `gh secret set` on every repo whose `configs/*.json` lists the secret (or on each
+`--repo owner/repo`). For `SERVICE_REPO_TOKEN` it first tests the token against
+`GET /repos/<owner>/arca-invoicing-service/contents`, which is what the workflow's checkout needs,
+and saves nothing if it fails: 401 means expired, revoked or mistyped; 403/404 means the token
+can't see that repo or lacks `Contents: read`. Fine-grained tokens report their expiry date.
+Use `--verify owner/repo` to test another secret that is a GitHub token.
+
 ## Not covered
 
 - The server side (deploy user, GHCR login, compose projects): see the main README's
